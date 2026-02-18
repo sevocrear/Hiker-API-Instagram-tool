@@ -64,7 +64,7 @@ uv run python instagram_accounts_topk.py --token "YOUR_HIKER_API_TOKEN_HERE" ...
 
 ### CLI usage
 
-Basic run:
+Basic single‑query run:
 
 ```bash
 uv run python instagram_accounts_topk.py \
@@ -75,9 +75,25 @@ uv run python instagram_accounts_topk.py \
   --output-prefix outputs/psychologist
 ```
 
+Multi‑query run (more coverage, deduped by account id):
+
+```bash
+uv run python instagram_accounts_topk.py \
+  --query "психолог" \
+  --query "терапевт" \
+  --query "семейный психолог" \
+  --query "psy" \
+  --query "psychologist" \
+  --max-accounts 500 \
+  --recent-reels 30 \
+  --top-k 10 \
+  --output-prefix outputs/psychologist_multi
+```
+
 **Arguments:**
 
-- **`--query`** (required): keyword for account search (can be Cyrillic/Unicode)
+- **`--query`** (required, repeatable): search keyword for account search (can be Cyrillic/Unicode).  
+  Pass it multiple times to combine several queries in a single run; accounts are deduplicated by `pk/id` before processing.
 - **`--max-accounts`**: max number of accounts to process (default: `200`)
 - **`--recent-reels`**: how many recent reels per account to request from HikerAPI (default: `50`)
 - **`--top-k`**: how many best reels to keep per account after ranking (default: `10`)

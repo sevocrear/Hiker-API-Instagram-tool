@@ -223,15 +223,34 @@ def select_top_k(reels: Iterable[MediaDict], k: int) -> List[MediaDict]:
 
 async def process_accounts(
     client: AsyncClient,
-    query: str,
+    queries: List[str],
     max_accounts: int,
     recent_reels: int,
     top_k: int,
 ) -> List[AccountWithReels]:
-    """Search -> fetch profile + reels per account -> normalize -> top-k."""
-    print(f"[INFO] Searching accounts for '{query}' ...", file=sys.stderr)
-    candidates = await search_accounts(client, query, max_accounts)
-    print(f"[INFO] Found {len(candidates)} candidate accounts", file=sys.stderr)
+    """Search (one or many queries) -> fetch profile + reels -> normalize -> top-k."""
+    print(f"[INFO] Searching accounts for queries: {queries}", file=sys.stderr)
+
+    all_candidates: List[AccountDict] = []
+    for q in queries:
+        found = await search_accounts(client, q, max_accounts)
+        # Optionally tag which query matched (not exported, but useful in debugging)
+        for u in found:
+            u.setdefault("_search_queries", set()).add(q)
+        all_candidates.extend(found)
+
+    # Deduplicate across all queries by pk and respect global max_accounts
+    seen: set = set()
+    candidates: List[AccountDict] = []
+    for u in all_candidates:
+        pk = str(u.get("pk") or u.get("id") or "")
+        if pk and pk not in seen:
+            seen.add(pk)
+            candidates.append(u)
+            if len(candidates) >= max_accounts:
+                break
+
+    print(f"[INFO] Found {len(candidates)} unique candidate accounts", file=sys.stderr)
 
     results: List[AccountWithReels] = []
     sem = asyncio.Semaphore(10)
@@ -258,9 +277,10 @@ async def process_accounts(
 
 def main_async(args: argparse.Namespace) -> None:
     client = AsyncClient(token=get_token(args.token))
+    queries = args.query if isinstance(args.query, list) else [args.query]
     data = asyncio.run(
         process_accounts(
-            client, args.query, args.max_accounts, args.recent_reels, args.top_k
+            client, queries, args.max_accounts, args.recent_reels, args.top_k
         )
     )
     if not data:
@@ -290,7 +310,12 @@ def main_async(args: argparse.Namespace) -> None:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Find IG accounts by keyword (HikerAPI), list Top-K reels per account.")
-    p.add_argument("--query", required=True, help="Search keyword")
+    p.add_argument(
+        "--query",
+        required=True,
+        action="append",
+        help="Search keyword. Can be provided multiple times for multi-query search.",
+    )
     p.add_argument("--max-accounts", type=int, default=200)
     p.add_argument("--recent-reels", type=int, default=50)
     p.add_argument("--top-k", type=int, default=10)
