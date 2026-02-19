@@ -99,6 +99,18 @@ uv run python instagram_accounts_topk.py \
 - **`--top-k`**: how many best reels to keep per account after ranking (default: `10`)
 - **`--token`**: HikerAPI token override (otherwise `HIKER_API_TOKEN` / `HIKER_API_KEY` are used)
 - **`--output-prefix`**: base path for output files (default: `outputs/instagram_accounts`)
+- **`--timeout`**: request timeout in seconds (default: `30`). Increase if you see many `ReadTimeout` entries in `error_log.jsonl`.
+- **`--concurrency`**: max concurrent account tasks, i.e. how many profiles+reels are fetched in parallel (default: `15`). Lower if HikerAPI rate-limits; raise for faster runs on stable networks.
+
+---
+
+### Performance
+
+- **Timeouts**: Each HikerAPI request uses a configurable timeout (default 30s). Slow or flaky networks can trigger `ReadTimeout`; increase with `--timeout` or retries will attempt the call again (see below).
+- **Retries**: Transient errors (`ReadTimeout`, connection errors) are retried up to 2 attempts with a 1.5s delay, so a single blip does not drop an account or search page.
+- **Concurrency**: Up to `--concurrency` accounts are processed in parallel (each does one profile + one reels request). Default is 15; tune down if you hit rate limits or up for faster runs.
+- **I/O**: All CSV/JSONL writes happen in one pass at the end; no blocking I/O inside async paths.
+- **Memory**: The full result set (accounts + top reels) is held in memory until files are written; for very large `--max-accounts` (e.g. thousands), consider splitting runs or lowering the limit.
 
 ---
 

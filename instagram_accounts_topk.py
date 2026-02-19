@@ -12,12 +12,44 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from traceback import format_exception
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 from dotenv import load_dotenv
 from hikerapi import AsyncClient
 
 load_dotenv()
+
+# Retry transient network errors (HikerAPI/httpx). Do not retry API logic errors (KeyError, state=False).
+try:
+    import httpx
+    _RETRY_EXCEPTIONS: Tuple[type, ...] = (asyncio.TimeoutError, httpx.ReadTimeout, httpx.ConnectError)
+except ImportError:
+    _RETRY_EXCEPTIONS = (asyncio.TimeoutError,)
+
+T = TypeVar("T")
+DEFAULT_REQUEST_TIMEOUT = 30.0
+DEFAULT_CONCURRENCY = 15
+RETRY_ATTEMPTS = 2
+RETRY_DELAY = 1.5
+
+
+async def _with_retry(
+    coro_factory: Callable[[], Awaitable[T]],
+    max_attempts: int = RETRY_ATTEMPTS,
+    delay: float = RETRY_DELAY,
+) -> T:
+    """Run coroutine from factory; on transient errors, wait and retry up to max_attempts."""
+    last: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return await coro_factory()
+        except _RETRY_EXCEPTIONS as e:
+            last = e
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(delay)
+    if last is not None:
+        raise last
+    raise RuntimeError("unreachable")
 
 AccountDict = Dict[str, Any]
 MediaDict = Dict[str, Any]
@@ -74,7 +106,9 @@ async def search_accounts(
 
     while len(candidates) < max_accounts:
         try:
-            res = await client.fbsearch_accounts_v3(query, page_token=page_token)
+            res = await _with_retry(
+                lambda pt=page_token: client.fbsearch_accounts_v3(query, page_token=pt)
+            )
         except Exception as e:
             print(f"[WARN] fbsearch_accounts_v3 failed: {e}", file=sys.stderr)
             log_error("fbsearch_accounts_v3", query=query, _exc=e)
@@ -123,7 +157,7 @@ async def fetch_profile(
     if not pk:
         return None
     try:
-        profile = await client.user_by_id_v2(str(pk))
+        profile = await _with_retry(lambda: client.user_by_id_v2(str(pk)))
     except Exception as e:
         print(f"[WARN] user_by_id_v2 failed for pk={pk}: {e}", file=sys.stderr)
         log_error("user_by_id_v2", pk=str(pk), username=raw_user.get("username"), _exc=e)
@@ -144,7 +178,9 @@ async def fetch_reels(
 ) -> List[MediaDict]:
     """Fetch up to count reels using user_clips helper (handles pagination)."""
     try:
-        clips = await client.user_clips(user_id=str(user_id), count=count)
+        clips = await _with_retry(
+            lambda: client.user_clips(user_id=str(user_id), count=count)
+        )
     except Exception as e:
         print(f"[WARN] user_clips failed for user_id={user_id}: {e}", file=sys.stderr)
         log_error("user_clips", user_id=str(user_id), requested_count=count, _exc=e)
@@ -227,6 +263,7 @@ async def process_accounts(
     max_accounts: int,
     recent_reels: int,
     top_k: int,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> List[AccountWithReels]:
     """Search (one or many queries) -> fetch profile + reels -> normalize -> top-k."""
     print(f"[INFO] Searching accounts for queries: {queries}", file=sys.stderr)
@@ -253,7 +290,7 @@ async def process_accounts(
     print(f"[INFO] Found {len(candidates)} unique candidate accounts", file=sys.stderr)
 
     results: List[AccountWithReels] = []
-    sem = asyncio.Semaphore(10)
+    sem = asyncio.Semaphore(concurrency)
 
     async def one(raw: AccountDict) -> None:
         async with sem:
@@ -270,17 +307,23 @@ async def process_accounts(
             top = select_top_k(norm_clips, top_k)
             results.append(AccountWithReels(account=norm, top_reels=top))
 
+    # Full result set kept in memory until main_async writes; fine for typical max_accounts.
     await asyncio.gather(*[asyncio.create_task(one(u)) for u in candidates])
     results.sort(key=lambda a: (a.account.get("follower_count") or 0), reverse=True)
     return results
 
 
 def main_async(args: argparse.Namespace) -> None:
-    client = AsyncClient(token=get_token(args.token))
+    client = AsyncClient(token=get_token(args.token), timeout=args.timeout)
     queries = args.query if isinstance(args.query, list) else [args.query]
     data = asyncio.run(
         process_accounts(
-            client, queries, args.max_accounts, args.recent_reels, args.top_k
+            client,
+            queries,
+            args.max_accounts,
+            args.recent_reels,
+            args.top_k,
+            concurrency=args.concurrency,
         )
     )
     if not data:
@@ -321,6 +364,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--token", help="HikerAPI token (or HIKER_API_TOKEN env)")
     p.add_argument("--output-prefix", default="outputs/instagram_accounts")
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_REQUEST_TIMEOUT,
+        help=f"Request timeout in seconds (default: {DEFAULT_REQUEST_TIMEOUT}).",
+    )
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        help=f"Max concurrent account tasks (default: {DEFAULT_CONCURRENCY}).",
+    )
     return p.parse_args(argv)
 
 

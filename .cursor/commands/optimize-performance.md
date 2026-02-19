@@ -15,6 +15,7 @@ Systematically optimize the Instagram Parser project for **throughput**, **laten
   - Per-request timeouts (HikerAPI/httpx defaults).
   - Order of operations: search → profile → reels per account; note where work is sequential vs parallel.
   - Any redundant API calls or repeated work.
+  - Memory leaks, slow operations, odd copying, data races, etc.
   - How often files are opened/closed and how much is buffered in memory.
 
 ### 2. **Network & API usage**
